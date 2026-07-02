@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cf-audit-gchat-webhook",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-02",
+  // Set your Cloudflare account ID before deploy.
+  "account_id": "YOUR_ACCOUNT_ID",
+  "workers_dev": true,
+  "triggers": {
+    "crons": ["*/1 * * * *", "0 0 * * *"]
+  },
+  "kv_namespaces": [
+    {
+      "binding": "STATE",
+      "id": "YOUR_KV_NAMESPACE_ID"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
