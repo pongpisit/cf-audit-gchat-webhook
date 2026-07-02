@@ -462,7 +462,8 @@ function buildEventCards(event: AuditEvent, index: number): GchatPayload["cardsV
   const resourceId = event.resource?.id ?? "unknown-resource-id";
   const resourceType = event.resource?.type ?? event.resource?.product ?? "unknown-resource-type";
   const profile = getEventProfile(event);
-  const what = `${action.type ?? "unknown-action"} on ${resourceName} (${resourceType}:${resourceId})`;
+  const what =
+    action.description ?? `${action.type ?? "unknown-action"} on ${resourceName} (${resourceType}:${resourceId})`;
   const who = `username=${username}`;
 
   const widgets: GchatPayload["cardsV2"][number]["card"]["sections"][number]["widgets"] = [
@@ -640,8 +641,13 @@ function getEventProfile(event: AuditEvent): EventProfile {
 }
 
 function extractChangeDetails(event: AuditEvent): string[] {
-  const lines: string[] = ["field | old | new"];
+  const lines: string[] = [];
   const changeSource = resolveChangeSource(event);
+  if (!changeSource.hasDiffSignal) {
+    return lines;
+  }
+
+  lines.push("field | old | new");
   const diff = buildDiff(changeSource.oldValue, changeSource.newValue);
   const ruleDetails = extractRuleDetails(event);
 
@@ -652,21 +658,21 @@ function extractChangeDetails(event: AuditEvent): string[] {
   if (diff.length > 0) {
     lines.push(...diff);
   } else {
-    if (changeSource.newValue !== undefined || changeSource.oldValue !== undefined) {
+    if (changeSource.oldValue !== undefined || changeSource.newValue !== undefined) {
       lines.push(formatChangeRow("value", changeSource.oldValue, changeSource.newValue));
     }
-  }
-
-  if (changeSource.note) {
-    lines.push(`note | - | ${changeSource.note}`);
   }
 
   return lines;
 }
 
-function resolveChangeSource(event: AuditEvent): { oldValue: unknown; newValue: unknown; note?: string } {
+function resolveChangeSource(event: AuditEvent): {
+  oldValue: unknown;
+  newValue: unknown;
+  hasDiffSignal: boolean;
+} {
   if (event.oldValue !== undefined || event.newValue !== undefined) {
-    return { oldValue: event.oldValue, newValue: event.newValue };
+    return { oldValue: event.oldValue, newValue: event.newValue, hasDiffSignal: true };
   }
 
   const requestBeforeAfter = pickBeforeAfter(event.resource?.request);
@@ -674,7 +680,7 @@ function resolveChangeSource(event: AuditEvent): { oldValue: unknown; newValue: 
     return {
       oldValue: requestBeforeAfter.before,
       newValue: requestBeforeAfter.after,
-      note: "from resource.request before/after payload",
+      hasDiffSignal: true,
     };
   }
 
@@ -683,27 +689,11 @@ function resolveChangeSource(event: AuditEvent): { oldValue: unknown; newValue: 
     return {
       oldValue: responseBeforeAfter.before,
       newValue: responseBeforeAfter.after,
-      note: "from resource.response before/after payload",
+      hasDiffSignal: true,
     };
   }
 
-  if (event.resource?.request !== undefined) {
-    return {
-      oldValue: undefined,
-      newValue: event.resource.request,
-      note: "Cloudflare API did not provide previous value; showing requested change payload",
-    };
-  }
-
-  if (event.resource?.response !== undefined) {
-    return {
-      oldValue: undefined,
-      newValue: event.resource.response,
-      note: "Cloudflare API did not provide previous value; showing response payload",
-    };
-  }
-
-  return { oldValue: undefined, newValue: undefined, note: "no change payload available from API" };
+  return { oldValue: undefined, newValue: undefined, hasDiffSignal: false };
 }
 
 function pickBeforeAfter(value: unknown): { before?: unknown; after?: unknown } {
