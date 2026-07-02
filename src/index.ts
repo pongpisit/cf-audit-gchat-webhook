@@ -602,7 +602,7 @@ function getEventProfile(event: AuditEvent): EventProfile {
 }
 
 function extractChangeDetails(event: AuditEvent): string[] {
-  const lines: string[] = [];
+  const lines: string[] = ["field | old | new"];
   const diff = buildDiff(event.oldValue, event.newValue);
   const ruleDetails = extractRuleDetails(event);
 
@@ -614,10 +614,7 @@ function extractChangeDetails(event: AuditEvent): string[] {
     lines.push(...diff);
   } else {
     if (event.oldValue !== undefined) {
-      lines.push(`old=${truncateText(toCompactJson(event.oldValue), 400)}`);
-    }
-    if (event.newValue !== undefined) {
-      lines.push(`new=${truncateText(toCompactJson(event.newValue), 400)}`);
+      lines.push(formatChangeRow("value", event.oldValue, event.newValue));
     }
   }
 
@@ -729,16 +726,14 @@ function buildDiff(oldValue: unknown, newValue: unknown): string[] {
 
   const lines: string[] = [];
 
-  for (const key of [...comparableKeys].sort()) {
+  for (const key of sortDiffKeys([...comparableKeys])) {
     const oldItem = oldFlat.get(`old.${key}`);
     const newItem = newFlat.get(`new.${key}`);
     if (isEqual(oldItem, newItem)) {
       continue;
     }
 
-    lines.push(
-      `${key}: ${truncateText(toCompactJson(oldItem), 120)} -> ${truncateText(toCompactJson(newItem), 120)}`,
-    );
+    lines.push(formatChangeRow(key, oldItem, newItem));
 
     if (lines.length >= 20) {
       lines.push("...more fields changed...");
@@ -770,39 +765,31 @@ function extractRuleDetails(event: AuditEvent): string[] {
   const newRuleOrFallback = newRule ?? (isRecord(event.newValue) ? event.newValue : undefined);
 
   const lines: string[] = [];
-  const ruleId =
-    readRecordString(newRuleOrFallback, "id") ??
-    readRecordString(oldRuleOrFallback, "id") ??
-    readRecordString(oldRuleOrFallback, "ref");
-  const expression =
-    readRecordString(newRuleOrFallback, "expression") ??
-    readRecordString(oldRuleOrFallback, "expression");
-  const actionValue =
-    readRecordString(newRuleOrFallback, "action") ??
-    readRecordString(oldRuleOrFallback, "action");
-  const description =
-    readRecordString(newRuleOrFallback, "description") ??
-    readRecordString(oldRuleOrFallback, "description");
+  const oldRuleId = readRecordString(oldRuleOrFallback, "id") ?? readRecordString(oldRuleOrFallback, "ref");
+  const newRuleId = readRecordString(newRuleOrFallback, "id") ?? readRecordString(newRuleOrFallback, "ref");
+  const oldExpression = readRecordString(oldRuleOrFallback, "expression");
+  const newExpression = readRecordString(newRuleOrFallback, "expression");
+  const oldAction = readRecordString(oldRuleOrFallback, "action");
+  const newAction = readRecordString(newRuleOrFallback, "action");
+  const oldDescription = readRecordString(oldRuleOrFallback, "description");
+  const newDescription = readRecordString(newRuleOrFallback, "description");
 
-  if (ruleId) {
-    lines.push(`rule.id: ${ruleId}`);
+  if (!isEqual(oldRuleId, newRuleId)) {
+    lines.push(formatChangeRow("rule.id", oldRuleId, newRuleId));
   }
-  if (actionValue) {
-    lines.push(`rule.action: ${actionValue}`);
+  if (!isEqual(oldAction, newAction)) {
+    lines.push(formatChangeRow("rule.action", oldAction, newAction));
   }
-  if (description) {
-    lines.push(`rule.description: ${description}`);
+  if (!isEqual(oldDescription, newDescription)) {
+    lines.push(formatChangeRow("rule.description", oldDescription, newDescription));
   }
-  if (expression) {
-    lines.push(`rule.expression: ${truncateText(expression, 220)}`);
+  if (!isEqual(oldExpression, newExpression)) {
+    lines.push(formatChangeRow("rule.expression", oldExpression, newExpression));
   }
 
   if (action.includes("delete")) {
     if (oldRuleOrFallback) {
-      lines.push(`deleted.rule.old: ${truncateText(toCompactJson(oldRuleOrFallback), 700)}`);
-    }
-    if (newRuleOrFallback) {
-      lines.push(`deleted.rule.new: ${truncateText(toCompactJson(newRuleOrFallback), 700)}`);
+      lines.push(formatChangeRow("deleted.rule", oldRuleOrFallback, newRuleOrFallback));
     }
   }
 
@@ -917,6 +904,45 @@ function flattenValue(
 
   walk(value, prefix, 0);
   return out;
+}
+
+function sortDiffKeys(keys: string[]): string[] {
+  const priorityPrefixes = [
+    "id",
+    "ref",
+    "action",
+    "description",
+    "expression",
+    "enabled",
+    "paused",
+    "priority",
+    "phase",
+    "value",
+  ];
+
+  const score = (key: string): number => {
+    for (let index = 0; index < priorityPrefixes.length; index += 1) {
+      if (key.startsWith(priorityPrefixes[index])) {
+        return index;
+      }
+    }
+    return priorityPrefixes.length;
+  };
+
+  return [...keys].sort((a, b) => {
+    const scoreA = score(a);
+    const scoreB = score(b);
+    if (scoreA !== scoreB) {
+      return scoreA - scoreB;
+    }
+    return a.localeCompare(b);
+  });
+}
+
+function formatChangeRow(field: string, oldValue: unknown, newValue: unknown): string {
+  const oldText = truncateText(toCompactJson(oldValue), 120);
+  const newText = truncateText(toCompactJson(newValue), 120);
+  return `${field} | ${oldText} | ${newText}`;
 }
 
 function toEventId(event: AuditEvent): string {
