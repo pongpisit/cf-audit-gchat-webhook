@@ -602,7 +602,8 @@ function getEventProfile(event: AuditEvent): EventProfile {
 
 function extractChangeDetails(event: AuditEvent): string[] {
   const lines: string[] = ["field | old | new"];
-  const diff = buildDiff(event.oldValue, event.newValue);
+  const changeSource = resolveChangeSource(event);
+  const diff = buildDiff(changeSource.oldValue, changeSource.newValue);
   const ruleDetails = extractRuleDetails(event);
 
   if (ruleDetails.length > 0) {
@@ -612,15 +613,85 @@ function extractChangeDetails(event: AuditEvent): string[] {
   if (diff.length > 0) {
     lines.push(...diff);
   } else {
-    if (event.oldValue !== undefined) {
-      lines.push(formatChangeRow("value", event.oldValue, event.newValue));
+    if (changeSource.newValue !== undefined || changeSource.oldValue !== undefined) {
+      lines.push(formatChangeRow("value", changeSource.oldValue, changeSource.newValue));
     }
   }
 
-  if (lines.length > 6) {
-    return [...lines.slice(0, 6), "...truncated..."];
+  if (changeSource.note) {
+    lines.push(`note | - | ${changeSource.note}`);
+  }
+
+  if (lines.length > 12) {
+    return [...lines.slice(0, 12), "...truncated..."];
   }
   return lines;
+}
+
+function resolveChangeSource(event: AuditEvent): { oldValue: unknown; newValue: unknown; note?: string } {
+  if (event.oldValue !== undefined || event.newValue !== undefined) {
+    return { oldValue: event.oldValue, newValue: event.newValue };
+  }
+
+  const requestBeforeAfter = pickBeforeAfter(event.resource?.request);
+  if (requestBeforeAfter.before !== undefined || requestBeforeAfter.after !== undefined) {
+    return {
+      oldValue: requestBeforeAfter.before,
+      newValue: requestBeforeAfter.after,
+      note: "from resource.request before/after payload",
+    };
+  }
+
+  const responseBeforeAfter = pickBeforeAfter(event.resource?.response);
+  if (responseBeforeAfter.before !== undefined || responseBeforeAfter.after !== undefined) {
+    return {
+      oldValue: responseBeforeAfter.before,
+      newValue: responseBeforeAfter.after,
+      note: "from resource.response before/after payload",
+    };
+  }
+
+  if (event.resource?.request !== undefined) {
+    return {
+      oldValue: undefined,
+      newValue: event.resource.request,
+      note: "Cloudflare API did not provide previous value; showing requested change payload",
+    };
+  }
+
+  if (event.resource?.response !== undefined) {
+    return {
+      oldValue: undefined,
+      newValue: event.resource.response,
+      note: "Cloudflare API did not provide previous value; showing response payload",
+    };
+  }
+
+  return { oldValue: undefined, newValue: undefined, note: "no change payload available from API" };
+}
+
+function pickBeforeAfter(value: unknown): { before?: unknown; after?: unknown } {
+  if (!isRecord(value)) {
+    return {};
+  }
+
+  const before =
+    value.old ??
+    value.before ??
+    value.previous ??
+    value.prev ??
+    value.prior ??
+    value.old_value ??
+    value.previous_value;
+  const after =
+    value.new ??
+    value.after ??
+    value.current ??
+    value.next ??
+    value.new_value ??
+    value.current_value;
+
+  return { before, after };
 }
 
 async function markBatchAsSent(env: Env, webhookUrl: string, events: AuditEvent[]): Promise<void> {
@@ -732,7 +803,12 @@ function buildDiff(oldValue: unknown, newValue: unknown): string[] {
       continue;
     }
 
-    lines.push(formatChangeRow(key, oldItem, newItem));
+    const summarizedRows = summarizeArrayDeltaRows(key, oldItem, newItem);
+    if (summarizedRows.length > 0) {
+      lines.push(...summarizedRows);
+    } else {
+      lines.push(formatChangeRow(key, oldItem, newItem));
+    }
 
     if (lines.length >= 20) {
       lines.push("...more fields changed...");
@@ -939,9 +1015,59 @@ function sortDiffKeys(keys: string[]): string[] {
 }
 
 function formatChangeRow(field: string, oldValue: unknown, newValue: unknown): string {
-  const oldText = truncateText(toCompactJson(oldValue), 120);
-  const newText = truncateText(toCompactJson(newValue), 120);
+  const oldText = truncateText(toDisplayValue(oldValue), 180);
+  const newText = truncateText(toDisplayValue(newValue), 180);
   return `${field} | ${oldText} | ${newText}`;
+}
+
+function summarizeArrayDeltaRows(field: string, oldValue: unknown, newValue: unknown): string[] {
+  if (!isPrimitiveArray(oldValue) || !isPrimitiveArray(newValue)) {
+    return [];
+  }
+
+  const oldSet = new Set(oldValue.map((item) => String(item)));
+  const newSet = new Set(newValue.map((item) => String(item)));
+  const removed = [...oldSet].filter((item) => !newSet.has(item));
+  const added = [...newSet].filter((item) => !oldSet.has(item));
+
+  if (added.length === 0 && removed.length === 0) {
+    return [];
+  }
+
+  const rows: string[] = [];
+  if (removed.length > 0) {
+    rows.push(
+      formatChangeRow(`${field}.removed`, removed.slice(0, 10), removed.length > 10 ? `+${removed.length - 10} more` : "-"),
+    );
+  }
+  if (added.length > 0) {
+    rows.push(
+      formatChangeRow(`${field}.added`, "-", added.slice(0, 10).concat(added.length > 10 ? [`+${added.length - 10} more`] : [])),
+    );
+  }
+
+  return rows;
+}
+
+function isPrimitiveArray(value: unknown): value is Array<string | number | boolean> {
+  if (!Array.isArray(value)) {
+    return false;
+  }
+
+  return value.every((item) => {
+    const itemType = typeof item;
+    return itemType === "string" || itemType === "number" || itemType === "boolean";
+  });
+}
+
+function toDisplayValue(value: unknown): string {
+  if (value === undefined) {
+    return "(not provided)";
+  }
+  if (value === null) {
+    return "null";
+  }
+  return toCompactJson(value);
 }
 
 function toEventId(event: AuditEvent): string {
