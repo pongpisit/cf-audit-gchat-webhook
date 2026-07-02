@@ -136,6 +136,8 @@ const LEDGER_RETENTION_SECONDS = 180 * 24 * 60 * 60;
 const REVERSE_TS_MAX = 9_999_999_999_999;
 const MAIN_CRON = "*/1 * * * *";
 const DAILY_SUMMARY_CRON = "0 0 * * *";
+const CHANGE_LINES_PER_CARD = 24;
+const CHANGE_CHARS_PER_CARD = 5000;
 const IMPORTANT_KEYWORDS = [
   "member",
   "token",
@@ -356,7 +358,7 @@ async function tryPostFallbackText(webhookUrl: string, text: string): Promise<bo
 }
 
 function formatGchatMessage(events: AuditEvent[]): GchatPayload {
-  const cards = events.map((event, index) => buildEventCard(event, index));
+  const cards = events.flatMap((event, index) => buildEventCards(event, index));
 
   return {
     text: `Cloudflare audit logs: ${events.length} new event(s)`,
@@ -438,7 +440,7 @@ function formatDailySummary(events: AuditEvent[], sinceIso: string, beforeIso: s
   };
 }
 
-function buildEventCard(event: AuditEvent, index: number): GchatPayload["cardsV2"][number] {
+function buildEventCards(event: AuditEvent, index: number): GchatPayload["cardsV2"] {
   const action = getAction(event);
   const eventTime = getEventTimestamp(event);
   const bkkTime = toBangkokTime(eventTime);
@@ -461,15 +463,17 @@ function buildEventCard(event: AuditEvent, index: number): GchatPayload["cardsV2
   ];
 
   const changeLines = extractChangeDetails(event);
-  if (changeLines.length > 0) {
+  const changeChunks = chunkChangeLines(changeLines, CHANGE_LINES_PER_CARD, CHANGE_CHARS_PER_CARD);
+
+  if (changeChunks.length > 0) {
     widgets.push({
       textParagraph: {
-        text: `<b>Change Details</b><br>${escapeForChat(changeLines.join("\n"))}`,
+        text: `<b>Change Details</b><br>${escapeForChat(changeChunks[0].join("\n"))}`,
       },
     });
   }
 
-  return {
+  const primaryCard: GchatPayload["cardsV2"][number] = {
     cardId: `audit-${index + 1}`,
     card: {
       header: {
@@ -483,6 +487,29 @@ function buildEventCard(event: AuditEvent, index: number): GchatPayload["cardsV2
       ],
     },
   };
+
+  const continuationCards = changeChunks.slice(1).map((chunk, chunkIndex) => ({
+    cardId: `audit-${index + 1}-changes-${chunkIndex + 1}`,
+    card: {
+      header: {
+        title: "Cloudflare Audit (Change Details)",
+        subtitle: escapeForChat(`${action.type ?? "unknown-action"} (continued ${chunkIndex + 1})`),
+      },
+      sections: [
+        {
+          widgets: [
+            {
+              textParagraph: {
+                text: `<b>Change Details</b><br>${escapeForChat(chunk.join("\n"))}`,
+              },
+            },
+          ],
+        },
+      ],
+    },
+  }));
+
+  return [primaryCard, ...continuationCards];
 }
 
 function routeByWebhook(events: AuditEvent[], env: Env): Map<string, AuditEvent[]> {
@@ -622,9 +649,6 @@ function extractChangeDetails(event: AuditEvent): string[] {
     lines.push(`note | - | ${changeSource.note}`);
   }
 
-  if (lines.length > 12) {
-    return [...lines.slice(0, 12), "...truncated..."];
-  }
   return lines;
 }
 
@@ -810,10 +834,6 @@ function buildDiff(oldValue: unknown, newValue: unknown): string[] {
       lines.push(formatChangeRow(key, oldItem, newItem));
     }
 
-    if (lines.length >= 20) {
-      lines.push("...more fields changed...");
-      break;
-    }
   }
 
   return lines;
@@ -1015,8 +1035,8 @@ function sortDiffKeys(keys: string[]): string[] {
 }
 
 function formatChangeRow(field: string, oldValue: unknown, newValue: unknown): string {
-  const oldText = truncateText(toDisplayValue(oldValue), 180);
-  const newText = truncateText(toDisplayValue(newValue), 180);
+  const oldText = toDisplayValue(oldValue);
+  const newText = toDisplayValue(newValue);
   return `${field} | ${oldText} | ${newText}`;
 }
 
@@ -1036,17 +1056,44 @@ function summarizeArrayDeltaRows(field: string, oldValue: unknown, newValue: unk
 
   const rows: string[] = [];
   if (removed.length > 0) {
-    rows.push(
-      formatChangeRow(`${field}.removed`, removed.slice(0, 10), removed.length > 10 ? `+${removed.length - 10} more` : "-"),
-    );
+    rows.push(formatChangeRow(`${field}.removed`, removed, "-"));
   }
   if (added.length > 0) {
-    rows.push(
-      formatChangeRow(`${field}.added`, "-", added.slice(0, 10).concat(added.length > 10 ? [`+${added.length - 10} more`] : [])),
-    );
+    rows.push(formatChangeRow(`${field}.added`, "-", added));
   }
 
   return rows;
+}
+
+function chunkChangeLines(lines: string[], maxLines: number, maxChars: number): string[][] {
+  if (lines.length === 0) {
+    return [];
+  }
+
+  const chunks: string[][] = [];
+  let current: string[] = [];
+  let currentChars = 0;
+
+  for (const line of lines) {
+    const lineLength = line.length + 1;
+    const exceedsLines = current.length >= maxLines;
+    const exceedsChars = currentChars + lineLength > maxChars;
+
+    if (current.length > 0 && (exceedsLines || exceedsChars)) {
+      chunks.push(current);
+      current = [];
+      currentChars = 0;
+    }
+
+    current.push(line);
+    currentChars += lineLength;
+  }
+
+  if (current.length > 0) {
+    chunks.push(current);
+  }
+
+  return chunks;
 }
 
 function isPrimitiveArray(value: unknown): value is Array<string | number | boolean> {
