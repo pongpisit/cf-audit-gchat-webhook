@@ -136,8 +136,11 @@ const LEDGER_RETENTION_SECONDS = 180 * 24 * 60 * 60;
 const REVERSE_TS_MAX = 9_999_999_999_999;
 const MAIN_CRON = "*/1 * * * *";
 const DAILY_SUMMARY_CRON = "0 0 * * *";
-const CHANGE_LINES_PER_CARD = 24;
-const CHANGE_CHARS_PER_CARD = 5000;
+const CHANGE_LINES_PER_CARD = 40;
+const CHANGE_CHARS_PER_CARD = 12000;
+const LONG_LINE_CHUNK_SIZE = 1800;
+const FLATTEN_MAX_DEPTH = 12;
+const FLATTEN_MAX_ENTRIES = 5000;
 const IMPORTANT_KEYWORDS = [
   "member",
   "token",
@@ -346,15 +349,24 @@ async function postToGoogleChat(webhookUrl: string, payload: GchatPayload): Prom
 }
 
 async function tryPostFallbackText(webhookUrl: string, text: string): Promise<boolean> {
-  const fallbackResponse = await fetch(webhookUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json; charset=UTF-8",
-    },
-    body: JSON.stringify({ text: truncateText(text, 3500) }),
-  });
+  const chunks = splitTextForFallback(text, 3500);
 
-  return fallbackResponse.ok;
+  for (let index = 0; index < chunks.length; index += 1) {
+    const partText = chunks.length === 1 ? chunks[index] : `[part ${index + 1}/${chunks.length}]\n${chunks[index]}`;
+    const fallbackResponse = await fetch(webhookUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=UTF-8",
+      },
+      body: JSON.stringify({ text: partText }),
+    });
+
+    if (!fallbackResponse.ok) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function formatGchatMessage(events: AuditEvent[]): GchatPayload {
@@ -948,8 +960,8 @@ function readRecordString(value: Record<string, unknown> | undefined, key: strin
 function flattenValue(
   value: unknown,
   prefix: string,
-  maxDepth = 4,
-  maxEntries = 120,
+  maxDepth = FLATTEN_MAX_DEPTH,
+  maxEntries = FLATTEN_MAX_ENTRIES,
 ): Map<string, unknown> {
   const out = new Map<string, unknown>();
 
@@ -1056,10 +1068,14 @@ function summarizeArrayDeltaRows(field: string, oldValue: unknown, newValue: unk
 
   const rows: string[] = [];
   if (removed.length > 0) {
-    rows.push(formatChangeRow(`${field}.removed`, removed, "-"));
+    for (let index = 0; index < removed.length; index += 1) {
+      rows.push(formatChangeRow(`${field}.removed[${index}]`, removed[index], "-"));
+    }
   }
   if (added.length > 0) {
-    rows.push(formatChangeRow(`${field}.added`, "-", added));
+    for (let index = 0; index < added.length; index += 1) {
+      rows.push(formatChangeRow(`${field}.added[${index}]`, "-", added[index]));
+    }
   }
 
   return rows;
@@ -1074,7 +1090,10 @@ function chunkChangeLines(lines: string[], maxLines: number, maxChars: number): 
   let current: string[] = [];
   let currentChars = 0;
 
-  for (const line of lines) {
+  for (const rawLine of lines) {
+    const preparedLines = splitLongLine(rawLine, LONG_LINE_CHUNK_SIZE);
+
+    for (const line of preparedLines) {
     const lineLength = line.length + 1;
     const exceedsLines = current.length >= maxLines;
     const exceedsChars = currentChars + lineLength > maxChars;
@@ -1087,10 +1106,46 @@ function chunkChangeLines(lines: string[], maxLines: number, maxChars: number): 
 
     current.push(line);
     currentChars += lineLength;
+    }
   }
 
   if (current.length > 0) {
     chunks.push(current);
+  }
+
+  return chunks;
+}
+
+function splitLongLine(line: string, maxChunkLength: number): string[] {
+  if (line.length <= maxChunkLength) {
+    return [line];
+  }
+
+  const parts: string[] = [];
+  let start = 0;
+  let part = 1;
+  while (start < line.length) {
+    const end = Math.min(start + maxChunkLength, line.length);
+    const content = line.slice(start, end);
+    parts.push(`${content} [cont.${part}]`);
+    start = end;
+    part += 1;
+  }
+
+  return parts;
+}
+
+function splitTextForFallback(text: string, maxChunkLength: number): string[] {
+  if (text.length <= maxChunkLength) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const end = Math.min(cursor + maxChunkLength, text.length);
+    chunks.push(text.slice(cursor, end));
+    cursor = end;
   }
 
   return chunks;
@@ -1220,13 +1275,6 @@ function toCompactJson(value: unknown): string {
   } catch {
     return "[unserializable]";
   }
-}
-
-function truncateText(value: string, maxLength: number): string {
-  if (value.length <= maxLength) {
-    return value;
-  }
-  return `${value.slice(0, maxLength - 3)}...`;
 }
 
 function escapeForChat(value: string): string {
