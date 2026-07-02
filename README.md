@@ -29,13 +29,13 @@ flowchart TD
     A[Cloudflare Audit Logs v2 API] -->|since/before/cursor| B[Worker Cron Poller]
     B --> C[Filter + Severity + Routing]
     C --> D[Dedup Check in KV]
-    D --> E[Google Chat Webhook\nCardsV2 Auditor View]
+    D --> E[Google Chat Webhook CardsV2 Auditor View]
     E --> F[Mark Sent + Write Ledger in KV]
     G[Daily Cron 00:00 UTC] --> H[24h Summary Builder]
     H --> E
-    I[/run endpoint] --> B
-    J[/summary endpoint] --> H
-    K[/ledger endpoint] --> L[Ledger Query from KV]
+    I[run endpoint] --> B
+    J[summary endpoint] --> H
+    K[ledger endpoint] --> L[Ledger Query from KV]
 ```
 
 ## Prerequisites
