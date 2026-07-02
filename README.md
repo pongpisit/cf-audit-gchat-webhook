@@ -118,6 +118,10 @@ Each event card emphasizes:
 - Result (success/failure)
 - Change details (`old -> new` fields)
 
+### Example Screenshot
+
+![Auditor View Example](docs/screenshots/auditor-view-example.png)
+
 ## Notes
 
 - Dedupe is only marked after webhook delivery succeeds.
