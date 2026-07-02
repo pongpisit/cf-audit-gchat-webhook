@@ -335,8 +335,24 @@ async function postToGoogleChat(webhookUrl: string, payload: GchatPayload): Prom
 
   if (!response.ok) {
     const body = await response.text();
+    const fallbackSent = await tryPostFallbackText(webhookUrl, payload.text);
+    if (fallbackSent) {
+      return;
+    }
     throw new Error(`Google Chat webhook failed (${response.status}): ${body}`);
   }
+}
+
+async function tryPostFallbackText(webhookUrl: string, text: string): Promise<boolean> {
+  const fallbackResponse = await fetch(webhookUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json; charset=UTF-8",
+    },
+    body: JSON.stringify({ text: truncateText(text, 3500) }),
+  });
+
+  return fallbackResponse.ok;
 }
 
 function formatGchatMessage(events: AuditEvent[]): GchatPayload {
@@ -607,6 +623,11 @@ function getEventProfile(event: AuditEvent): EventProfile {
 function extractChangeDetails(event: AuditEvent): string[] {
   const lines: string[] = [];
   const diff = buildDiff(event.oldValue, event.newValue);
+  const ruleDetails = extractRuleDetails(event);
+
+  if (ruleDetails.length > 0) {
+    lines.push(...ruleDetails);
+  }
 
   if (diff.length > 0) {
     lines.push(...diff);
@@ -706,16 +727,30 @@ function parseLedgerEntry(raw: string): LedgerEntry | null {
 }
 
 function buildDiff(oldValue: unknown, newValue: unknown): string[] {
-  if (!isRecord(oldValue) || !isRecord(newValue)) {
+  if (oldValue === undefined && newValue === undefined) {
     return [];
   }
 
-  const keys = new Set<string>([...Object.keys(oldValue), ...Object.keys(newValue)]);
+  const oldFlat = flattenValue(oldValue, "old");
+  const newFlat = flattenValue(newValue, "new");
+  const comparableKeys = new Set<string>();
+
+  for (const key of oldFlat.keys()) {
+    if (key.startsWith("old.")) {
+      comparableKeys.add(key.slice(4));
+    }
+  }
+  for (const key of newFlat.keys()) {
+    if (key.startsWith("new.")) {
+      comparableKeys.add(key.slice(4));
+    }
+  }
+
   const lines: string[] = [];
 
-  for (const key of [...keys].sort()) {
-    const oldItem = oldValue[key];
-    const newItem = newValue[key];
+  for (const key of [...comparableKeys].sort()) {
+    const oldItem = oldFlat.get(`old.${key}`);
+    const newItem = newFlat.get(`new.${key}`);
     if (isEqual(oldItem, newItem)) {
       continue;
     }
@@ -723,9 +758,184 @@ function buildDiff(oldValue: unknown, newValue: unknown): string[] {
     lines.push(
       `${key}: ${truncateText(toCompactJson(oldItem), 120)} -> ${truncateText(toCompactJson(newItem), 120)}`,
     );
+
+    if (lines.length >= 20) {
+      lines.push("...more fields changed...");
+      break;
+    }
   }
 
   return lines;
+}
+
+function extractRuleDetails(event: AuditEvent): string[] {
+  const action = (getAction(event).type ?? "").toLowerCase();
+  const resourceType = (event.resource?.type ?? event.resource?.product ?? "").toLowerCase();
+  const rawUri = (event.raw?.uri ?? "").toLowerCase();
+
+  const isRulesEvent =
+    resourceType.includes("rule") ||
+    action.includes("rule") ||
+    rawUri.includes("rules") ||
+    rawUri.includes("rulesets");
+
+  if (!isRulesEvent) {
+    return [];
+  }
+
+  const oldRule = findRuleObject(event.oldValue);
+  const newRule = findRuleObject(event.newValue);
+  const oldRuleOrFallback = oldRule ?? (isRecord(event.oldValue) ? event.oldValue : undefined);
+  const newRuleOrFallback = newRule ?? (isRecord(event.newValue) ? event.newValue : undefined);
+
+  const lines: string[] = [];
+  const ruleId =
+    readRecordString(newRuleOrFallback, "id") ??
+    readRecordString(oldRuleOrFallback, "id") ??
+    readRecordString(oldRuleOrFallback, "ref");
+  const expression =
+    readRecordString(newRuleOrFallback, "expression") ??
+    readRecordString(oldRuleOrFallback, "expression");
+  const actionValue =
+    readRecordString(newRuleOrFallback, "action") ??
+    readRecordString(oldRuleOrFallback, "action");
+  const description =
+    readRecordString(newRuleOrFallback, "description") ??
+    readRecordString(oldRuleOrFallback, "description");
+
+  if (ruleId) {
+    lines.push(`rule.id: ${ruleId}`);
+  }
+  if (actionValue) {
+    lines.push(`rule.action: ${actionValue}`);
+  }
+  if (description) {
+    lines.push(`rule.description: ${description}`);
+  }
+  if (expression) {
+    lines.push(`rule.expression: ${truncateText(expression, 220)}`);
+  }
+
+  if (action.includes("delete")) {
+    if (oldRuleOrFallback) {
+      lines.push(`deleted.rule.old: ${truncateText(toCompactJson(oldRuleOrFallback), 700)}`);
+    }
+    if (newRuleOrFallback) {
+      lines.push(`deleted.rule.new: ${truncateText(toCompactJson(newRuleOrFallback), 700)}`);
+    }
+  }
+
+  return lines;
+}
+
+function findRuleObject(value: unknown): Record<string, unknown> | undefined {
+  if (isRuleShape(value)) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findRuleObject(item);
+      if (found) {
+        return found;
+      }
+    }
+    return undefined;
+  }
+
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  for (const nested of Object.values(value)) {
+    const found = findRuleObject(nested);
+    if (found) {
+      return found;
+    }
+  }
+
+  return undefined;
+}
+
+function isRuleShape(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.id === "string" ||
+    typeof value.ref === "string" ||
+    typeof value.expression === "string" ||
+    typeof value.action === "string"
+  );
+}
+
+function readRecordString(value: Record<string, unknown> | undefined, key: string): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const item = value[key];
+  if (typeof item === "string" && item.length > 0) {
+    return item;
+  }
+  return undefined;
+}
+
+function flattenValue(
+  value: unknown,
+  prefix: string,
+  maxDepth = 4,
+  maxEntries = 120,
+): Map<string, unknown> {
+  const out = new Map<string, unknown>();
+
+  const walk = (node: unknown, path: string, depth: number): void => {
+    if (out.size >= maxEntries) {
+      return;
+    }
+
+    if (depth > maxDepth) {
+      out.set(path, "[max-depth]");
+      return;
+    }
+
+    if (Array.isArray(node)) {
+      if (node.length === 0) {
+        out.set(path, []);
+        return;
+      }
+
+      for (let index = 0; index < node.length; index += 1) {
+        walk(node[index], `${path}[${index}]`, depth + 1);
+        if (out.size >= maxEntries) {
+          return;
+        }
+      }
+      return;
+    }
+
+    if (isRecord(node)) {
+      const keys = Object.keys(node);
+      if (keys.length === 0) {
+        out.set(path, {});
+        return;
+      }
+
+      for (const key of keys.sort()) {
+        walk(node[key], `${path}.${key}`, depth + 1);
+        if (out.size >= maxEntries) {
+          return;
+        }
+      }
+      return;
+    }
+
+    out.set(path, node);
+  };
+
+  walk(value, prefix, 0);
+  return out;
 }
 
 function toEventId(event: AuditEvent): string {
