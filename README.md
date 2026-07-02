@@ -2,6 +2,8 @@
 
 Send Cloudflare Audit Logs v2 events to Google Chat with an auditor-friendly format (`who`, `when`, `what`, `old vs new`) using Cloudflare Workers.
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/pongpisit/cf-audit-gchat-webhook)
+
 ## Features
 
 - Polls Cloudflare Audit Logs v2 (`/accounts/{account_id}/logs/audit`)
@@ -21,6 +23,20 @@ Send Cloudflare Audit Logs v2 events to Google Chat with an auditor-friendly for
   - Dedupe: `dedupe:<event_id>`
   - Ledger by event: `ledger:event:<event_id>`
   - Ledger recent index: `ledger:recent:<reverse_ts>:<event_id>`
+
+```mermaid
+flowchart TD
+    A[Cloudflare Audit Logs v2 API] -->|since/before/cursor| B[Worker Cron Poller]
+    B --> C[Filter + Severity + Routing]
+    C --> D[Dedup Check in KV]
+    D --> E[Google Chat Webhook\nCardsV2 Auditor View]
+    E --> F[Mark Sent + Write Ledger in KV]
+    G[Daily Cron 00:00 UTC] --> H[24h Summary Builder]
+    H --> E
+    I[/run endpoint] --> B
+    J[/summary endpoint] --> H
+    K[/ledger endpoint] --> L[Ledger Query from KV]
+```
 
 ## Prerequisites
 
@@ -72,6 +88,17 @@ npx wrangler secret put ALERT_ACTION_ALLOWLIST
 ```bash
 npm run deploy
 ```
+
+## One-Click Deploy
+
+1. Click the **Deploy to Cloudflare** button at the top of this README.
+2. Connect your GitHub repo/fork and complete the Worker deployment flow.
+3. Add required secrets in Worker settings or via Wrangler:
+   - `CF_ACCOUNT_ID`
+   - `CF_API_TOKEN`
+   - `GCHAT_WEBHOOK_URL`
+4. Create KV namespace `STATE`, then set its ID in `wrangler.jsonc`.
+5. Run `GET /health`, then `GET /run` to validate.
 
 ## Endpoints
 
