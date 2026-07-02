@@ -443,20 +443,19 @@ function buildEventCard(event: AuditEvent, index: number): GchatPayload["cardsV2
   const eventTime = getEventTimestamp(event);
   const bkkTime = toBangkokTime(eventTime);
   const actorIp = event.actor?.ip ?? event.actor?.ip_address ?? "unknown-ip";
-  const actorIdentity = [event.actor?.email, event.actor?.id, event.actor?.type]
-    .filter((value): value is string => Boolean(value))
-    .join(" | ");
+  const username = event.actor?.email ?? event.actor?.type ?? "unknown-actor";
   const resourceName = event.resource?.name ?? "unknown-resource-name";
   const resourceId = event.resource?.id ?? "unknown-resource-id";
   const resourceType = event.resource?.type ?? event.resource?.product ?? "unknown-resource-type";
   const profile = getEventProfile(event);
   const what = `${action.type ?? "unknown-action"} on ${resourceName} (${resourceType}:${resourceId})`;
-  const who = `username=${actorIdentity || "unknown-actor"} | ip=${actorIp}`;
+  const who = `username=${username}`;
 
   const widgets: GchatPayload["cardsV2"][number]["card"]["sections"][number]["widgets"] = [
     { decoratedText: { topLabel: "Severity", text: profile.severity } },
     { decoratedText: { topLabel: "When (BKK +07)", text: escapeForChat(bkkTime) } },
     { decoratedText: { topLabel: "Who", text: escapeForChat(who) } },
+    { decoratedText: { topLabel: "IP", text: escapeForChat(actorIp) } },
     { decoratedText: { topLabel: "What", text: escapeForChat(what) } },
     { decoratedText: { topLabel: "Action Result", text: escapeForChat(action.result ?? "unknown-result") } },
   ];
