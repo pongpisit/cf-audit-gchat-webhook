@@ -441,6 +441,7 @@ function formatDailySummary(events: AuditEvent[], sinceIso: string, beforeIso: s
 function buildEventCard(event: AuditEvent, index: number): GchatPayload["cardsV2"][number] {
   const action = getAction(event);
   const eventTime = getEventTimestamp(event);
+  const bkkTime = toBangkokTime(eventTime);
   const actorIp = event.actor?.ip ?? event.actor?.ip_address ?? "unknown-ip";
   const actorIdentity = [event.actor?.email, event.actor?.id, event.actor?.type]
     .filter((value): value is string => Boolean(value))
@@ -450,36 +451,16 @@ function buildEventCard(event: AuditEvent, index: number): GchatPayload["cardsV2
   const resourceType = event.resource?.type ?? event.resource?.product ?? "unknown-resource-type";
   const profile = getEventProfile(event);
   const what = `${action.type ?? "unknown-action"} on ${resourceName} (${resourceType}:${resourceId})`;
+  const who = `username=${actorIdentity || "unknown-actor"} | ip=${actorIp}`;
 
   const widgets: GchatPayload["cardsV2"][number]["card"]["sections"][number]["widgets"] = [
     { decoratedText: { topLabel: "Severity", text: profile.severity } },
-    { decoratedText: { topLabel: "When", text: escapeForChat(eventTime) } },
-    { decoratedText: { topLabel: "Who", text: escapeForChat(actorIdentity || "unknown-actor") } },
-    { decoratedText: { topLabel: "Who IP", text: escapeForChat(actorIp) } },
+    { decoratedText: { topLabel: "When (BKK +07)", text: escapeForChat(bkkTime) } },
+    { decoratedText: { topLabel: "Who", text: escapeForChat(who) } },
     { decoratedText: { topLabel: "What", text: escapeForChat(what) } },
     { decoratedText: { topLabel: "Action Result", text: escapeForChat(action.result ?? "unknown-result") } },
-    { decoratedText: { topLabel: "Event ID", text: escapeForChat(event.id ?? "unknown") } },
   ];
 
-  if (action.description) {
-    widgets.push({ decoratedText: { topLabel: "Action Description", text: escapeForChat(action.description) } });
-  }
-  if (event.account?.id || event.account?.name) {
-    widgets.push({
-      decoratedText: {
-        topLabel: "Account",
-        text: escapeForChat(`${event.account?.name ?? "unknown-account-name"} | ${event.account?.id ?? "unknown-account-id"}`),
-      },
-    });
-  }
-  if (event.zone?.id || event.zone?.name) {
-    widgets.push({
-      decoratedText: {
-        topLabel: "Zone",
-        text: escapeForChat(`${event.zone?.name ?? "unknown-zone-name"} | ${event.zone?.id ?? "unknown-zone-id"}`),
-      },
-    });
-  }
   const changeLines = extractChangeDetails(event);
   if (changeLines.length > 0) {
     widgets.push({
@@ -494,7 +475,7 @@ function buildEventCard(event: AuditEvent, index: number): GchatPayload["cardsV2
     card: {
       header: {
         title: "Cloudflare Audit (Auditor View)",
-        subtitle: escapeForChat(`${action.type ?? "unknown-action"} | ${profile.severity}`),
+        subtitle: escapeForChat(`${action.type ?? "unknown-action"}`),
       },
       sections: [
         {
@@ -1001,6 +982,24 @@ function toPositiveInt(raw: string | null, fallback: number, max: number): numbe
   }
 
   return Math.min(parsed, max);
+}
+
+function toBangkokTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return iso;
+  }
+
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Bangkok",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
 }
 
 function formatKeyValueList(items: Array<[string, number]>): string {
